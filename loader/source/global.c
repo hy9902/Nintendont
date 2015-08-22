@@ -37,7 +37,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "exi.h"
 #include "global.h"
 #include "font_ttf.h"
-
+#include "dip.h"
 
 GRRLIB_ttfFont *myFont;
 GRRLIB_texImg *background;
@@ -247,17 +247,12 @@ bool LoadNinCFG()
 	BytesRead = fread(ncfg, 1, sizeof(NIN_CFG), cfg);
 	switch( ncfg->Version )
 	{
-		default:
-		{
-			ConfigLoaded = false;
-			break;
-		}
 		case 2:
 		{
 			if(BytesRead != 540)
 				ConfigLoaded = false;
 		} break;
-		case NIN_CFG_VERSION:
+		default:
 		{
 			if(BytesRead != sizeof(NIN_CFG))
 				ConfigLoaded = false;
@@ -267,11 +262,8 @@ bool LoadNinCFG()
 	if (ncfg->Magicbytes != 0x01070CF6)
 		ConfigLoaded = false;
 
-	if (ncfg->Version < 3)	//need to upgrade config from ver 2 to ver 3
-	{
-		ncfg->MemCardBlocks = 0x2;//251 blocks
-		ncfg->Version = 3;
-	}
+	UpdateNinCFG();
+
 	if (ncfg->Version != NIN_CFG_VERSION)
 		ConfigLoaded = false;
 
@@ -352,39 +344,136 @@ u32 OffsetCheck[4] = {
 	0x20D7E8, //VS4
 };
 
-bool IsTRIGame(char *Path)
+static char *GetTRIName(u32 i)
 {
-	u32 DOLOffset = 0;
-	char FullPath[300];
-	sprintf(FullPath, "%s:%s", GetRootDevice(), Path);
-	FILE *f = fopen(FullPath, "rb");
-	if(f != NULL)
+	char *name = "TRI_NONE";
+	switch(i)
 	{
-		fseek(f, 0x420, SEEK_SET);
-		fread(&DOLOffset, 1, 4, f);
+		case TRI_GP1:
+			name = "TRI_GP1";
+			break;
+		case TRI_GP2:
+			name = "TRI_GP2";
+			break;
+		case TRI_AX:
+			name = "TRI_AX";
+			break;
+		case TRI_VS4:
+			name = "TRI_VS4";
+			break;
+		default:
+			break;
+	}
+	return name;
+}
+
+u32 IsTRIGame(char *Path, u32 CurDICMD, u32 ISOShift)
+{
+	FILE *f = NULL;
+	u32 DOLOffset = 0;
+	if(CurDICMD)
+	{
+		ReadRealDisc((u8*)&DOLOffset, 0x420+ISOShift, 4, CurDICMD);
+		DOLOffset+=ISOShift;
 	}
 	else
 	{
-		char FSTPath[300];
-		sprintf(FSTPath, "%ssys/main.dol", FullPath);
-		f = fopen(FSTPath, "rb");
+		char FullPath[300];
+		sprintf(FullPath, "%s:%s", GetRootDevice(), Path);
+		f = fopen(FullPath, "rb");
+		if(f != NULL)
+		{
+			fseek(f, 0x420+ISOShift, SEEK_SET);
+			fread(&DOLOffset, 1, 4, f);
+			DOLOffset+=ISOShift;
+		}
+		else
+		{
+			char FSTPath[300];
+			sprintf(FSTPath, "%ssys/main.dol", FullPath);
+			f = fopen(FSTPath, "rb");
+		}
+		if(f == NULL)
+			return false;
 	}
-	if(f != NULL)
+
+	u32 i;
+	u32 BufAtOffset;
+	for(i = 0; i < 4; ++i)
 	{
-		u32 i;
-		u32 BufAtOffset;
-		for(i = 0; i < 4; ++i)
+		if(f != NULL)
 		{
 			fseek(f, DOLOffset+OffsetCheck[i], SEEK_SET);
 			fread(&BufAtOffset, 1, 4, f);
-			if(BufAtOffset == 0x386000A8)
-			{
-				fclose(f);
-				gprintf("Found TRIGame %u\n", i);
-				return true;
-			}
 		}
-		fclose(f);
+		else if(CurDICMD)
+		{
+			ReadRealDisc((u8*)&BufAtOffset, DOLOffset+OffsetCheck[i], 4, CurDICMD);
+		}
+		if(BufAtOffset == 0x386000A8)
+		{
+			if(f != NULL)
+				fclose(f);
+			gprintf("Found TRIGame %s\n", GetTRIName(i+1));
+			return i+1;
+		}
 	}
-	return false;
+	if(f != NULL)
+		fclose(f);
+	return 0;
+}
+
+void UpdateNinCFG()
+{
+	if (ncfg->Version == 2)
+	{	//251 blocks, used to be there
+		ncfg->Unused = 0x2;
+		ncfg->Version = 3;
+	}
+	if (ncfg->Version == 3)
+	{	//new memcard setting space
+		ncfg->MemCardBlocks = ncfg->Unused;
+		ncfg->VideoScale = 0;
+		ncfg->VideoOffset = 0;
+		ncfg->Version = 4;
+	}
+	if (ncfg->Version == 4)
+	{	//Option got changed so not confuse it
+		ncfg->Config &= ~NIN_CFG_HID;
+		ncfg->Version = 5;
+	}
+	if (ncfg->Version == 5)
+	{	//New Video Mode option
+		ncfg->VideoMode &= ~NIN_VID_PATCH_PAL50;
+		ncfg->Version = 6;
+	}
+}
+
+int CreateNewFile(char *Path, u32 size)
+{
+	FILE *f;
+	f = fopen(Path, "rb");
+	if(f != NULL)
+	{	//create ONLY new files
+		fclose(f);
+		return -1;
+	}
+	f = fopen(Path, "wb");
+	if(f == NULL)
+	{
+		gprintf("Failed to create %s!\r\n", Path);
+		return -2;
+	}
+	void *buf = malloc(size);
+	if(buf == NULL)
+	{
+		gprintf("Failed to allocate %i bytes!\r\n", size);
+		return -3;
+	}
+	memset(buf, 0, size);
+	fwrite(buf, 1, size, f);
+	free(buf);
+	fclose(f);
+	gprintf("Created %s with %i bytes!\r\n", Path, size);
+	return 0;
 }

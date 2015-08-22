@@ -49,6 +49,10 @@ extern void __exception_setreload(int t);
 extern void __SYS_ReadROM(void *buf,u32 len,u32 offset);
 extern u32 __SYS_GetRTC(u32 *gctime);
 
+extern syssram* __SYS_LockSram();
+extern u32 __SYS_UnlockSram(u32 write);
+extern u32 __SYS_SyncSram(void);
+
 #define STATUS			((void*)0x90004100)
 #define STATUS_LOADING	(*(vu32*)(0x90004100))
 #define STATUS_SECTOR	(*(vu32*)(0x90004100 + 8))
@@ -212,8 +216,8 @@ int main(int argc, char **argv)
 	FPAD_Update();
 
 	PrintInfo();
-	PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + + 430, MENU_POS_Y + 20*1, "Home: Exit");
-	PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + + 430, MENU_POS_Y + 20*2, "A   : Select");
+	PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + + 430, MENU_POS_Y + 20*0, "Home: Exit");
+	PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + + 430, MENU_POS_Y + 20*1, "A   : Select");
 	GRRLIB_Render();
 	ClearScreen();
 
@@ -231,7 +235,7 @@ int main(int argc, char **argv)
 	{
 		fprintf(meta, "%s\r\n<app version=\"1\">\r\n\t<name>%s</name>\r\n", META_XML, META_NAME);
 		fprintf(meta, "\t<coder>%s</coder>\r\n\t<version>%d.%d</version>\r\n", META_AUTHOR, NIN_VERSION>>16, NIN_VERSION&0xFFFF);
-		fprintf(meta, "\t<release_date>20140430000000</release_date>\r\n");
+		fprintf(meta, "\t<release_date>20150531000000</release_date>\r\n");
 		fprintf(meta, "\t<short_description>%s</short_description>\r\n", META_SHORT);
 		fprintf(meta, "\t<long_description>%s\r\n\r\n%s</long_description>\r\n", META_LONG1, META_LONG2);
 		fprintf(meta, "\t<ahb_access/>\r\n</app>");
@@ -245,11 +249,7 @@ int main(int argc, char **argv)
 	if(argc > 1) //every 0x00 gets counted as one arg so just make sure its more than the path and copy
 	{
 		memcpy(ncfg, argv[1], sizeof(NIN_CFG));
-		if (ncfg->Version == 2)	//need to upgrade config from ver 2 to ver 3
-		{
-			ncfg->MemCardBlocks = 0x2;//251 blocks
-			ncfg->Version = 3;
-		}
+		UpdateNinCFG(); //support for old versions with this
 		if(ncfg->Magicbytes == 0x01070CF6 && ncfg->Version == NIN_CFG_VERSION && ncfg->MaxPads <= NIN_CFG_MAXPAD)
 		{
 			if(ncfg->Config & NIN_CFG_AUTO_BOOT)
@@ -293,6 +293,7 @@ int main(int argc, char **argv)
 			i++;
 		}
 	}
+	ReconfigVideo(rmode);
 	UseSD = (ncfg->Config & NIN_CFG_USB) == 0;
 
 	bool progressive = (CONF_GetProgressiveScan() > 0) && VIDEO_HaveComponentCable();
@@ -301,6 +302,7 @@ int main(int argc, char **argv)
 	else
 		ncfg->VideoMode &= ~NIN_VID_PROG;
 
+//Select SD or USB base
 	if((ncfg->Config & NIN_CFG_AUTO_BOOT) == 0)
 	{
 		while (1)
@@ -310,8 +312,8 @@ int main(int argc, char **argv)
 
 			UseSD = (ncfg->Config & NIN_CFG_USB) == 0;
 			PrintInfo();
-			PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + 430, MENU_POS_Y + 20*1, "Home: Exit");
-			PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + 430, MENU_POS_Y + 20*2, "A   : Select");
+			PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + 430, MENU_POS_Y + 20*0, "Home: Exit");
+			PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + 430, MENU_POS_Y + 20*1, "A   : Select");
 			PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + 53 * 6 - 8, MENU_POS_Y + 20 * 6, UseSD ? ARROW_LEFT : "");
 			PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + 53 * 6 - 8, MENU_POS_Y + 20 * 7, UseSD ? "" : ARROW_LEFT);
 			PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X + 47 * 6 - 8, MENU_POS_Y + 20 * 6, " SD  ");
@@ -345,18 +347,15 @@ int main(int argc, char **argv)
 	fwrite( (char*)0x90100000, 1, NKernelSize, out );
 	fclose(out);*/
 
-//Load config
-
-//Reset drive
-
+//Get Game Selection
 	bool SaveSettings = false;
 	if( ncfg->Config & NIN_CFG_AUTO_BOOT )
 		gprintf("Autobooting:\"%s\"\r\n", ncfg->GamePath );
 	else
 		SaveSettings = SelectGame();
 
+//Init DI and set correct ID if needed
 	u32 CurDICMD = 0;
-	//Init DI and set correct ID if needed
 	if( memcmp(ncfg->GamePath, "di", 3) == 0 )
 	{
 		ClearScreen();
@@ -504,7 +503,7 @@ int main(int argc, char **argv)
 			{
 				PrintInfo();
 				for( i=0; i < j; ++i )
-					PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X, MENU_POS_Y + 20*5 + i * 20, "%50.50s [%.6s]%s", gi[i].Name, gi[i].ID, i == PosX ? ARROW_LEFT : " " );
+					PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X, MENU_POS_Y + 20*4 + i * 20, "%50.50s [%.6s]%s", gi[i].Name, gi[i].ID, i == PosX ? ARROW_LEFT : " " );
 				GRRLIB_Render();
 				Screenshot();
 				ClearScreen();
@@ -514,10 +513,14 @@ int main(int argc, char **argv)
 		ISOShift = Offsets[PosX];
 		memcpy(&(ncfg->GameID), gi[PosX].ID, 4);
 	}
-	*(vu32*)0xD300300C = ISOShift; //multi-iso games
+//multi-iso game hack
+	*(vu32*)0xD300300C = ISOShift;
 
-	//Set Language
-	if(ncfg->Language == NIN_LAN_AUTO)
+//Check if game is Triforce game
+	u32 TRIGame = IsTRIGame(ncfg->GamePath, CurDICMD, ISOShift);
+
+//Set Language
+	if(ncfg->Language == NIN_LAN_AUTO || ncfg->Language >= NIN_LAN_LAST)
 	{
 		switch (CONF_GetLanguage())
 		{
@@ -548,6 +551,7 @@ int main(int argc, char **argv)
 		char BasePath[20];
 		sprintf(BasePath, "%s:/saves", GetRootDevice());
 		mkdir(BasePath, S_IREAD | S_IWRITE);
+
 		char MemCardName[8];
 		memset(MemCardName, 0, 8);
 		if ( ncfg->Config & NIN_CFG_MC_MULTI )
@@ -574,11 +578,47 @@ int main(int argc, char **argv)
 		}
 		else
 			fclose(f);
+
+		if(TRIGame == TRI_GP1)
+		{
+			gprintf("GP1 Memory\r\n");
+			sprintf(MemCard, "%s/GP1.bin", BasePath);
+			CreateNewFile(MemCard, 0x45);
+		}
+		else if(TRIGame == TRI_GP2)
+		{
+			gprintf("GP2 Memory\r\n");
+			sprintf(MemCard, "%s/GP2.bin", BasePath);
+			CreateNewFile(MemCard, 0x45);
+		}
+		else if(TRIGame == TRI_AX)
+		{
+			gprintf("AX Memory\r\n");
+			sprintf(MemCard, "%s/AX.bin", BasePath);
+			CreateNewFile(MemCard, 0xCF);
+			sprintf(MemCard, "%s/AXsettings.bin", BasePath);
+			CreateNewFile(MemCard, 0x2B);
+		}
+		else if(TRIGame == TRI_VS4)
+		{
+			gprintf("VS4 Memory\r\n");
+			sprintf(MemCard, "%s/VS4settings.bin", BasePath);
+			CreateNewFile(MemCard, 0x2B);
+		}
 	}
+	else //setup real sram language
+	{
+		syssram *sram;
+		sram = __SYS_LockSram();
+		sram->lang = ncfg->Language;
+		__SYS_UnlockSram(1); // 1 -> write changes
+		while(!__SYS_SyncSram());
+	}
+
 	void *iplbuf = NULL;
 	bool useipl = false;
 	bool useipltri = false;
-	if(IsTRIGame(ncfg->GamePath) == false && (ncfg->Config & NIN_CFG_MEMCARDEMU))
+	if(TRIGame == TRI_NONE)
 	{
 		char iplchar[32];
 		if((ncfg->GameID & 0xFF) == 'E')
@@ -602,7 +642,7 @@ int main(int argc, char **argv)
 			fclose(f);
 		}
 	}
-	else if(IsTRIGame(ncfg->GamePath) == true)
+	else
 	{
 		char iplchar[32];
 		sprintf(iplchar, "%s:/segaboot.bin", GetRootDevice());
@@ -632,6 +672,15 @@ int main(int argc, char **argv)
 
 	WUPC_Shutdown();
 	WPAD_Shutdown();
+
+//before flushing do game specific patches
+	if(ncfg->Config & NIN_CFG_FORCE_PROG &&
+			ncfg->GameID == 0x47584745)
+	{	//Mega Man X Collection does progressive ingame so
+		//forcing it would mess with the interal game setup
+		gprintf("Disabling Force Progressive for this game\r\n");
+		ncfg->Config &= ~NIN_CFG_FORCE_PROG;
+	}
 
 //make sure the cfg gets to the kernel
 	DCStoreRange((void*)ncfg, sizeof(NIN_CFG));
@@ -760,28 +809,6 @@ int main(int argc, char **argv)
 			PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X, MENU_POS_Y + 20*15, "Init CARD...");
 		if(abs(STATUS_LOADING) > 10 && abs(STATUS_LOADING) < 20)
 			PrintFormat(DEFAULT_SIZE, BLACK, MENU_POS_X, MENU_POS_Y + 20*15, "Init CARD... Done!");
-		if(STATUS_LOADING == -10)
-		{
-			PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*15, "Init CARD... Failed! Shutting down");
-			switch (STATUS_ERROR)
-			{
-				case -1:
-					PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*16, "Missing %s:/sneek/kenobiwii.bin", GetRootDevice());
-					break;
-				case -2:
-					PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*16, "Missing Cheat file", GetRootDevice());
-					break;
-				/*case -3:
-					PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*16, "Cheat file too large", GetRootDevice());
-					break;
-				case -4:
-					PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*16, "Cheat path is empty", GetRootDevice());
-					break;*/
-				default:
-					PrintFormat(DEFAULT_SIZE, MAROON, MENU_POS_X, MENU_POS_Y + 20*16, "Unknown error %d %35s", STATUS_ERROR, " ");
-					break;
-			}
-		}
 		GRRLIB_Screen2Texture(0, 0, screen_buffer, GX_FALSE); // Copy all status messages
 		GRRLIB_Render();
 		ClearScreen();
@@ -856,22 +883,33 @@ int main(int argc, char **argv)
 	}
 	
 	gprintf("Region:%u\r\n", Region );
-	progressive = ncfg->Config & NIN_CFG_FORCE_PROG;
+	progressive = (ncfg->Config & NIN_CFG_FORCE_PROG)
+		&& !useipl && !useipltri;
+
 	switch(Region)
 	{
 		default:
 		case 0:
 		case 1:
 		{
-			gprintf("NTSC\r\n");
+			if( *(vu32*)0x800000CC == 3 )
+			{
+				gprintf("MPAL\r\n");
 
-			*(vu32*)0x800000CC = 0;
+				if(progressive)
+					vmode = &TVNtsc480Prog;
+				else
+					vmode = &TVMpal480IntDf;
+			} else {
+				gprintf("NTSC\r\n");
 
-			if(progressive)
-				vmode = &TVNtsc480Prog;
-			else
-				vmode = &TVNtsc480IntDf;
-			
+				*(vu32*)0x800000CC = 0;
+
+				if(progressive)
+					vmode = &TVNtsc480Prog;
+				else
+					vmode = &TVNtsc480IntDf;
+			}
 		} break;
 		case 2:
 		{
@@ -892,20 +930,44 @@ int main(int argc, char **argv)
 				else
 					vmode = &TVMpal480IntDf;
 			} else {
-				
 				gprintf("PAL50\r\n");
+
+				*(vu32*)0x800000CC = 1;
 
 				if(progressive)
 					vmode = &TVEurgb60Hz480Prog;
 				else
 					vmode = &TVPal528IntDf;
 			}
-
-			*(vu32*)0x800000CC = 1;
-
 		} break;
 	}
-	VIDEO_Configure( vmode );
+	if((ncfg->Config & NIN_CFG_MEMCARDEMU) == 0) //setup real sram video
+	{
+		syssram *sram;
+		sram = __SYS_LockSram();
+		sram->ntd		&= ~0x40;	// Clear PAL60
+		sram->flags		&= ~0x80;	// Clear Progmode
+		sram->flags		&= ~3;		// Clear Videomode
+		switch(ncfg->GameID & 0xFF)
+		{
+			case 'E':
+			case 'J':
+				//BMX XXX doesnt even boot on a real gc with component cables
+				if( (ncfg->GameID >> 8) != 0x474233 &&
+					(ncfg->VideoMode & NIN_VID_PROG) )
+					sram->flags |= 0x80;	// Set Progmode
+				break;
+			default:
+				sram->ntd		|= 0x40;	// Set PAL60
+				break;
+		}
+		if(*(vu32*)0x800000CC == 1 || *(vu32*)0x800000CC == 5)
+			sram->flags	|= 1; //PAL Video Mode
+		__SYS_UnlockSram(1); // 1 -> write changes
+		while(!__SYS_SyncSram());
+	}
+	
+	ReconfigVideo(vmode);
 	VIDEO_SetBlack(FALSE);
 	VIDEO_Flush();
 	VIDEO_WaitVSync();
@@ -982,6 +1044,10 @@ int main(int argc, char **argv)
 	__lwp_thread_closeall();
 
 	DVDStartCache(); //waits for kernel start
+	DCInvalidateRange((void*)0x90000000, 0x1000000);
+	memset((void*)(void*)0x90000000, 0, 0x1000000); //clear ARAM
+	DCFlushRange((void*)0x90000000, 0x1000000);
+
 	gprintf("Game Start\n");
 
 	if(useipl)
